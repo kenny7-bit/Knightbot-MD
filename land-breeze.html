@@ -1177,7 +1177,8 @@
         }
 
         .form-input,
-        .form-textarea {
+        .form-textarea,
+        select {
             width: 100%;
             padding: 12px 14px;
             border: 1px solid rgba(100, 150, 255, 0.30);
@@ -1196,9 +1197,15 @@
         }
 
         .form-input:focus,
-        .form-textarea:focus {
+        .form-textarea:focus,
+        select:focus {
             background: rgba(100, 150, 255, 0.15);
             border-color: rgba(100, 150, 255, 0.50);
+        }
+
+        select option {
+            background: #1a1a2e;
+            color: #fff;
         }
 
         .form-textarea {
@@ -1281,6 +1288,11 @@
             animation: slideIn 0.3s ease;
         }
 
+        .notification.error {
+            color: #ff9999;
+            border-color: rgba(220, 80, 80, 0.35);
+        }
+
         @keyframes slideIn {
             from {
                 transform: translateX(400px);
@@ -1290,6 +1302,22 @@
                 transform: translateX(0);
                 opacity: 1;
             }
+        }
+
+        /* ============ LOADING SPINNER ============ */
+        .loading-spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(100, 150, 255, 0.3);
+            border-top: 2px solid #80b3ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
 
         /* ============ SCROLLBAR ============ */
@@ -1459,11 +1487,11 @@
         </div>
         <div class="form-group">
             <label class="form-label">Payment Method</label>
-            <select id="paymentMethod" class="form-input" onchange="updatePaymentInfo()">
+            <select id="paymentMethod" onchange="updatePaymentInfo()">
                 <option value="">Select Payment Method</option>
-                <option value="stripe">Stripe (1 USDT)</option>
-                <option value="crypto">Crypto Wallet (1 USDT)</option>
-                <option value="paypal">PayPal (1 USDT)</option>
+                <option value="stripe">💳 Stripe (1 USDT)</option>
+                <option value="crypto">🔗 Crypto Wallet (1 USDT)</option>
+                <option value="paypal">🅿️ PayPal (1 USDT)</option>
             </select>
         </div>
         <div id="paymentInfo" class="form-info" style="display: none; margin-top: 16px;"></div>
@@ -1475,6 +1503,18 @@
 </div>
 
 <script>
+    // ============ FIREBASE CONFIG ============
+    const firebaseConfig = {
+        apiKey: "AIzaSyBCD6O1pTdNA6CdJXZGGKCAh9ShcCRa4ZE",
+        authDomain: "lovelyfi-commission.firebaseapp.com",
+        databaseURL: "https://lovelyfi-commission-default-rtdb.firebaseio.com",
+        projectId: "lovelyfi-commission",
+        storageBucket: "lovelyfi-commission.firebasestorage.app",
+        messagingSenderId: "906033676705",
+        appId: "1:906033676705:web:1c9599746ea1cdaa53cbe0",
+        measurementId: "G-Y0NGZC1KRV"
+    };
+
     // ============ CONFIG & CONSTANTS ============
     const INACTIVITY_TIMEOUT = 30000;
     const MESSAGE_CACHE_SIZE = 100;
@@ -1499,44 +1539,115 @@
     let messageTimestamps = new Map();
     let processedMessageIds = new Set();
     let userVotedFor = {};
-    let promotedMessages = {}; // Store promoted messages
-    let pendingPromotion = null; // Store pending promotion data
+    let promotedMessages = {};
+    let pendingPromotion = null;
 
-    // ============ LISTENERS ============
+    let db = null;
     let usersListener = null;
-    let messagesSyncListener = null;
+    let messagesListener = null;
+    let promosListener = null;
+
+    // ============ FIREBASE INITIALIZATION ============
+    function initializeFirebase() {
+        try {
+            firebase.initializeApp(firebaseConfig);
+            db = firebase.firestore();
+            console.log("✅ Firebase initialized successfully");
+            initializeApp();
+        } catch (error) {
+            console.error("❌ Firebase initialization error:", error);
+            showNotif("❌ Failed to connect to server", true);
+        }
+    }
 
     // ============ INITIALIZATION ============
     function initializeApp() {
-        currentUserId = localStorage.getItem('userId') || 'user_' + Math.random().toString(36).substring(7);
+        currentUserId = localStorage.getItem('userId') || 'user_' + Math.random().toString(36).substring(7).toUpperCase();
         localStorage.setItem('userId', currentUserId);
         
-        document.getElementById("profileUsername").value = currentUserId;
+        // Generate username if not exists
+        currentUsername = localStorage.getItem('username') || 'User_' + currentUserId.substring(0, 6);
+        localStorage.setItem('username', currentUsername);
+        
+        document.getElementById("profileUsername").value = currentUsername;
+        document.getElementById("settingsDisplayName").value = currentUsername;
+        
         setupActivityDetection();
         loadChatHistoryFromStorage();
         loadReadMessagesFromStorage();
         loadVotedForUsers();
-        loadPromotedMessages();
         
-        // Simulate Firebase data loading
-        mockInitializeData();
+        // Setup Firebase listeners
+        setupUserListener();
+        setupPromotedMessagesListener();
+        
+        showNotif("✅ Connected to Land Breeze");
     }
 
-    // ============ MOCK DATA FOR DEMO ============
-    function mockInitializeData() {
-        users = {
-            'user_001': { userId: 'user_001', username: 'Alex', isOnline: true },
-            'user_002': { userId: 'user_002', username: 'Jordan', isOnline: false },
-            'user_003': { userId: 'user_003', username: 'Casey', isOnline: true }
-        };
-        usernames = {
-            'user_001': 'Alex',
-            'user_002': 'Jordan',
-            'user_003': 'Casey'
-        };
-        updateOnlineCount();
-        renderChats();
-        renderUsers();
+    // ============ FIREBASE LISTENERS ============
+    function setupUserListener() {
+        if(usersListener) usersListener();
+        
+        usersListener = db.collection("chat_users")
+            .onSnapshot(snap => {
+                users = {};
+                usernames = {};
+                snap.forEach(doc => {
+                    let u = doc.data();
+                    users[u.userId] = u;
+                    usernames[u.userId] = u.username;
+                });
+                renderChats();
+                renderUsers();
+                updateOnlineCount();
+            }, err => {
+                console.error("Users listener error:", err);
+                showNotif("⚠️ Error loading users", true);
+            });
+    }
+
+    function setupMessagesListener(conversationId) {
+        if(messagesListener) messagesListener();
+        
+        messagesListener = db.collection("conversations").doc(conversationId)
+            .collection("messages")
+            .orderBy("timestamp", "asc")
+            .limit(MESSAGE_CACHE_SIZE)
+            .onSnapshot(snap => {
+                messageStore[conversationId] = [];
+                snap.forEach(doc => {
+                    if(doc.data().deleted !== true) {
+                        messageStore[conversationId].push({
+                            id: doc.id,
+                            ...doc.data()
+                        });
+                    }
+                });
+                renderMessages();
+                autoScrollToBottom();
+            }, err => {
+                console.error("Messages listener error:", err);
+            });
+    }
+
+    function setupPromotedMessagesListener() {
+        if(promosListener) promosListener();
+        
+        promosListener = db.collection("promoted_messages")
+            .orderBy("timestamp", "desc")
+            .limit(50)
+            .onSnapshot(snap => {
+                promotedMessages = {};
+                snap.forEach(doc => {
+                    promotedMessages[doc.id] = doc.data();
+                });
+                renderChats();
+                if(selectedUserId === SYSTEM_USER_ID) {
+                    renderMessages();
+                }
+            }, err => {
+                console.error("Promotions listener error:", err);
+            });
     }
 
     // ============ ACTIVITY DETECTION ============
@@ -1545,13 +1656,27 @@
         
         if(!isCurrentUserActive) {
             isCurrentUserActive = true;
+            updatePresence();
         }
         
         if(inactivityTimer) clearTimeout(inactivityTimer);
         
         inactivityTimer = setTimeout(() => {
             isCurrentUserActive = false;
+            updatePresence();
         }, INACTIVITY_TIMEOUT);
+    }
+
+    function updatePresence() {
+        if(!currentUserId || !db) return;
+        
+        db.collection("chat_users").doc(currentUserId).set({
+            userId: currentUserId,
+            username: currentUsername,
+            isOnline: isCurrentUserActive,
+            lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
+            lastActivityTime: Date.now()
+        }, {merge: true}).catch(err => console.error("Presence update error:", err));
     }
 
     function setupActivityDetection() {
@@ -1562,8 +1687,10 @@
         window.addEventListener("focus", () => detectActivity("focus"));
         window.addEventListener("blur", () => {
             isCurrentUserActive = false;
+            updatePresence();
         });
         detectActivity("init");
+        updatePresence();
     }
 
     // ============ STORAGE FUNCTIONS ============
@@ -1616,25 +1743,6 @@
         }
     }
 
-    function loadPromotedMessages() {
-        let s = localStorage.getItem(`promoted_messages`);
-        if(s) {
-            try {
-                promotedMessages = JSON.parse(s);
-            } catch(e) {
-                promotedMessages = {};
-            }
-        }
-    }
-
-    function savePromotedMessages() {
-        try {
-            localStorage.setItem(`promoted_messages`, JSON.stringify(promotedMessages));
-        } catch(e) {
-            console.error("Storage quota exceeded:", e);
-        }
-    }
-
     // ============ MESSAGE MANAGEMENT ============
     function countUnreadMessages(convId) {
         let msgs = messageStore[convId] || [];
@@ -1654,7 +1762,6 @@
         });
         
         saveReadMessagesToStorage();
-        renderMessages();
     }
 
     function sanitizeHTML(text) {
@@ -1803,7 +1910,7 @@
                         <div class="message-bubble">
                             <div class="message-text">${msgText}</div>
                             <div class="message-meta">
-                                <span class="message-time">${new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                <span class="message-time">${new Date(msg.timestamp.toDate ? msg.timestamp.toDate() : msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                             </div>
                         </div>
                     </div>
@@ -1815,8 +1922,8 @@
                         <div class="message-bubble">
                             <div class="message-text">${msgText}</div>
                             <div class="message-meta">
-                                <span class="message-time">${new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                                ${isOwn ? `<span class="message-status ${msg.status === 'seen' ? 'seen' : ''}">${msg.status}</span>` : ''}
+                                <span class="message-time">${new Date(msg.timestamp.toDate ? msg.timestamp.toDate() : msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                ${isOwn ? `<span class="message-status ${msg.status === 'seen' ? 'seen' : ''}">${msg.status || 'sent'}</span>` : ''}
                             </div>
                         </div>
                     </div>
@@ -1851,6 +1958,11 @@
             document.getElementById("headerStatusDot").classList.remove("offline");
             document.getElementById("voteBtn").style.display = "none";
             document.getElementById("promoteBtn").style.display = "none";
+            
+            // Load system messages
+            if(!messageStore[SYSTEM_USER_ID]) {
+                messageStore[SYSTEM_USER_ID] = [];
+            }
         } else {
             document.getElementById("chatDetailHeader").classList.remove("system-header");
             let user = users[userId];
@@ -1862,6 +1974,10 @@
             document.getElementById("voteBtn").style.display = "flex";
             document.getElementById("promoteBtn").style.display = "flex";
             document.getElementById("voteBtn").classList.toggle("voted", !!userVotedFor[userId]);
+            
+            // Load conversation messages from Firebase
+            let convId = [currentUserId, userId].sort().join("_");
+            setupMessagesListener(convId);
         }
         
         renderMessages();
@@ -1869,6 +1985,7 @@
 
     function goBackToChats() {
         showChats();
+        if(messagesListener) messagesListener();
     }
 
     function showChats() {
@@ -1952,7 +2069,7 @@
 
     function bulkDelete() {
         if(selectedChats.size === 0) {
-            showNotif("❌ No chats selected");
+            showNotif("❌ No chats selected", true);
             return;
         }
         
@@ -1978,43 +2095,54 @@
         
         if(!msg) return;
         if(!selectedUserId) {
-            showNotif("❌ Select a chat first");
+            showNotif("❌ Select a chat first", true);
+            return;
+        }
+        if(!db) {
+            showNotif("❌ Not connected to server", true);
             return;
         }
         
-        let newMsg = {
-            id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(7),
+        let convId = selectedUserId === SYSTEM_USER_ID 
+            ? SYSTEM_USER_ID 
+            : [currentUserId, selectedUserId].sort().join("_");
+        
+        let msgData = {
             senderId: currentUserId,
             senderName: currentUsername,
             message: msg,
-            timestamp: Date.now(),
-            status: 'delivered',
+            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+            status: 'sent',
             deleted: false
         };
         
-        if(!messageStore[selectedUserId]) {
-            messageStore[selectedUserId] = [];
-        }
-        
-        messageStore[selectedUserId].push(newMsg);
-        
-        chatHistory[selectedUserId] = {
-            m: msg,
-            t: Date.now()
-        };
-        
-        saveChatHistoryToStorage();
-        input.value = '';
-        input.style.height = 'auto';
-        renderMessages();
-        renderChats();
-        
-        detectActivity("message_sent");
+        // Save to Firebase
+        db.collection("conversations").doc(convId)
+            .collection("messages")
+            .add(msgData)
+            .then(() => {
+                // Update chat history
+                chatHistory[selectedUserId] = {
+                    m: msg,
+                    t: Date.now()
+                };
+                saveChatHistoryToStorage();
+                
+                input.value = '';
+                input.style.height = 'auto';
+                renderChats();
+                
+                detectActivity("message_sent");
+            })
+            .catch(err => {
+                console.error("Send message error:", err);
+                showNotif("❌ Failed to send message", true);
+            });
     }
 
     function sendVote() {
         if(selectedUserId === SYSTEM_USER_ID) {
-            showNotif("❌ Can't vote on system messages");
+            showNotif("❌ Can't vote on system messages", true);
             return;
         }
         
@@ -2024,11 +2152,24 @@
             return;
         }
         
-        userVotedFor[selectedUserId] = true;
-        localStorage.setItem(`voted_users_${currentUserId}`, JSON.stringify(userVotedFor));
+        if(!db) {
+            showNotif("❌ Not connected to server", true);
+            return;
+        }
         
-        btn.classList.add("voted");
-        showNotif("❤️ Vote sent!");
+        db.collection("user_votes").add({
+            votedBy: currentUserId,
+            votedFor: selectedUserId,
+            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        }).then(() => {
+            userVotedFor[selectedUserId] = true;
+            localStorage.setItem(`voted_users_${currentUserId}`, JSON.stringify(userVotedFor));
+            btn.classList.add("voted");
+            showNotif("❤️ Vote sent!");
+        }).catch(err => {
+            console.error("Vote error:", err);
+            showNotif("❌ Failed to send vote", true);
+        });
     }
 
     function handleKeyPress(event) {
@@ -2045,7 +2186,7 @@
     // ============ PROMOTION SYSTEM ============
     function openPromoteModal() {
         if(!selectedUserId || selectedUserId === SYSTEM_USER_ID) {
-            showNotif("❌ Invalid selection");
+            showNotif("❌ Invalid selection", true);
             return;
         }
         
@@ -2101,12 +2242,17 @@
         let method = document.getElementById("paymentMethod").value;
         
         if(!message || !method) {
-            showNotif("❌ Please fill all fields");
+            showNotif("❌ Please fill all fields", true);
             return;
         }
         
         if(message.length > 500) {
-            showNotif("❌ Message too long (max 500 characters)");
+            showNotif("❌ Message too long (max 500 characters)", true);
+            return;
+        }
+        
+        if(!db) {
+            showNotif("❌ Not connected to server", true);
             return;
         }
         
@@ -2115,43 +2261,33 @@
         document.getElementById("submitPromoteBtn").textContent = "Processing...";
         
         setTimeout(() => {
-            // Create promoted message
-            let promoId = 'promo_' + Date.now();
-            promotedMessages[promoId] = {
-                id: promoId,
+            // Save promoted message to Firebase
+            db.collection("promoted_messages").add({
                 userId: pendingPromotion.userId,
                 userName: pendingPromotion.userName,
                 message: message,
-                timestamp: Date.now(),
-                paymentMethod: method
-            };
-            
-            savePromotedMessages();
-            
-            // Add to system channel
-            if(!messageStore[SYSTEM_USER_ID]) {
-                messageStore[SYSTEM_USER_ID] = [];
-            }
-            
-            chatHistory[SYSTEM_USER_ID] = {
-                m: message,
-                t: Date.now()
-            };
-            
-            saveChatHistoryToStorage();
-            
-            document.getElementById("submitPromoteBtn").disabled = false;
-            document.getElementById("submitPromoteBtn").textContent = "💳 Pay & Promote";
-            
-            closePromoteModal();
-            renderChats();
-            
-            showNotif("✅ Message promoted! Check the Updates channel to see it.");
-            
-            // If currently viewing system channel, refresh messages
-            if(selectedUserId === SYSTEM_USER_ID) {
-                renderMessages();
-            }
+                timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                paymentMethod: method,
+                cost: PROMOTION_COST
+            }).then(() => {
+                document.getElementById("submitPromoteBtn").disabled = false;
+                document.getElementById("submitPromoteBtn").textContent = "💳 Pay & Promote";
+                
+                closePromoteModal();
+                renderChats();
+                
+                showNotif("✅ Message promoted! Check the Updates channel to see it.");
+                
+                // If currently viewing system channel, refresh messages
+                if(selectedUserId === SYSTEM_USER_ID) {
+                    renderMessages();
+                }
+            }).catch(err => {
+                console.error("Promotion error:", err);
+                document.getElementById("submitPromoteBtn").disabled = false;
+                document.getElementById("submitPromoteBtn").textContent = "💳 Pay & Promote";
+                showNotif("❌ Failed to promote message", true);
+            });
         }, 2000);
     }
 
@@ -2167,6 +2303,7 @@
     }
 
     function openSettingsModal() {
+        document.getElementById("settingsDisplayName").value = currentUsername;
         document.getElementById("settingsModal").classList.add("show");
     }
 
@@ -2176,19 +2313,32 @@
 
     function saveSettings() {
         let displayName = document.getElementById("settingsDisplayName").value.trim();
-        if(displayName && displayName.length >= 2) {
-            currentUsername = displayName;
-            showNotif("✓ Settings saved!");
-            closeSettingsModal();
-        } else {
-            showNotif("❌ Display name must be at least 2 characters");
+        if(!displayName || displayName.length < 2) {
+            showNotif("❌ Display name must be at least 2 characters", true);
+            return;
         }
+        if(displayName.length > 30) {
+            showNotif("❌ Display name too long (max 30 characters)", true);
+            return;
+        }
+        
+        currentUsername = displayName;
+        localStorage.setItem('username', currentUsername);
+        
+        if(db) {
+            db.collection("chat_users").doc(currentUserId).update({
+                username: currentUsername
+            }).catch(err => console.error("Update error:", err));
+        }
+        
+        showNotif("✓ Settings saved!");
+        closeSettingsModal();
     }
 
     // ============ NOTIFICATIONS ============
-    function showNotif(message) {
+    function showNotif(message, isError = false) {
         let notif = document.createElement("div");
-        notif.className = "notification";
+        notif.className = isError ? "notification error" : "notification";
         notif.innerText = message;
         document.body.appendChild(notif);
         
@@ -2198,7 +2348,7 @@
     }
 
     // ============ STARTUP ============
-    window.addEventListener("load", initializeApp);
+    window.addEventListener("load", initializeFirebase);
 </script>
 
 </body>
